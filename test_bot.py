@@ -1,0 +1,768 @@
+import asyncio
+import re
+from typing import Dict, Optional
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    Message,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+)
+
+TOKEN = "8321928023:AAEj64fVqkVnBWj-jytnryYzNYfCwij6t_c"
+
+# Замени на свои реальные контакты
+CONTACT_TELEGRAM = "@xxx"
+CONTACT_EMAIL = "yourmail@example.com"
+ADMIN_CHAT_ID = -5223588688  # chat_id пользователя @zhenyakalinin
+
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+USER_LANGUAGES: Dict[int, str] = {}
+
+
+class ExchangeStates(StatesGroup):
+    choosing_from_currency = State()
+    choosing_to_currency = State()
+    entering_amount = State()
+    entering_city = State()
+    confirming_exchange = State()
+
+
+LANGUAGE_LABELS: Dict[str, str] = {
+    "ru": "Русский",
+    "en": "English",
+}
+
+CURRENCIES: Dict[str, Dict[str, str]] = {
+    "USD": {"ru": "Доллар", "en": "Dollar"},
+    "ILS": {"ru": "Шекель", "en": "Shekel"},
+    "EUR": {"ru": "Евро", "en": "Euro"},
+    "RUB": {"ru": "Рубль", "en": "Ruble"},
+}
+
+CURRENCY_EMOJIS: Dict[str, str] = {
+    "USD": "💵",
+    "ILS": "₪",
+    "EUR": "💶",
+    "RUB": "₽",
+}
+
+CURRENCY_REQUEST_LABELS: Dict[str, Dict[str, str]] = {
+    "USD": {"ru": "долларов", "en": "dollars"},
+    "ILS": {"ru": "шекелей", "en": "shekels"},
+    "EUR": {"ru": "евро", "en": "euros"},
+    "RUB": {"ru": "рублей", "en": "rubles"},
+}
+
+TEXTS: Dict[str, Dict[str, str]] = {
+    "choose_language": {
+        "ru": "🌐 Выберите язык / Choose your language:",
+        "en": "🌐 Choose your language / Выберите язык:",
+    },
+    "restart": {"ru": "🔄 Начать сначала", "en": "🔄 Start over"},
+    "contacts": {"ru": "📞 Контакты для связи", "en": "📞 Contact details"},
+    "cancel": {"ru": "❌ Отмена", "en": "❌ Cancel"},
+    "restart_inline": {"ru": "🔄 Начать заново", "en": "🔄 Restart"},
+    "back": {"ru": "⬅️ Назад", "en": "⬅️ Back"},
+    "confirm_yes": {"ru": "✅ Да", "en": "✅ Yes"},
+    "confirm_no": {"ru": "❌ Нет", "en": "❌ No"},
+    "cancel_request": {"ru": "❌ Отменить заявку", "en": "❌ Cancel request"},
+    "contacts_message": {
+        "ru": "📞 Контакты для связи\n\nTelegram: {telegram}\nEmail: {email}\n\nНапишите нам, если хотите задать вопрос или обсудить обмен.",
+        "en": "📞 Contact details\n\nTelegram: {telegram}\nEmail: {email}\n\nMessage us if you have questions or want to discuss an exchange.",
+    },
+    "welcome": {
+        "ru": "👋 Добро пожаловать в обменный бот.\n\nЗдесь вы можете быстро рассчитать сумму обмена между валютами 💱",
+        "en": "👋 Welcome to the exchange bot.\n\nHere you can quickly calculate exchange amounts between currencies 💱",
+    },
+    "choose_from_currency": {
+        "ru": "💱 Выберите валюту, которую хотите поменять:",
+        "en": "💱 Choose the currency you want to exchange:",
+    },
+    "restart_message": {
+        "ru": "🔄 Начинаем сначала.\n\nДавайте заново выберем параметры обмена.",
+        "en": "🔄 Starting over.\n\nLet's choose the exchange details again.",
+    },
+    "choose_to_currency": {
+        "ru": "💸 Выберите валюту, которую хотите получить:",
+        "en": "💸 Choose the currency you want to receive:",
+    },
+    "same_currency_error": {
+        "ru": "Нельзя выбрать одинаковую валюту.",
+        "en": "You cannot choose the same currency.",
+    },
+    "amount_prompt": {
+        "ru": "💰 Введите сумму для обмена.\n\nДопустимые форматы:\n• 999\n• 1000\n• 12567\n• 12567.50\n• 100000.75",
+        "en": "💰 Enter the amount to exchange.\n\nAccepted formats:\n• 999\n• 1000\n• 12567\n• 12567.50\n• 100000.75",
+    },
+    "amount_invalid": {
+        "ru": "⚠️ Некорректный формат суммы.\n\nИспользуйте один из форматов:\n• 999\n• 1000\n• 12567\n• 12567.50\n• 100000.75",
+        "en": "⚠️ Invalid amount format.\n\nUse one of these formats:\n• 999\n• 1000\n• 12567\n• 12567.50\n• 100000.75",
+    },
+    "city_prompt": {
+        "ru": "🏙️ В каком городе должен произойти обмен?",
+        "en": "🏙️ In which city should the exchange take place?",
+    },
+    "city_invalid": {
+        "ru": "🏙️ Укажите город, в котором должен произойти обмен.",
+        "en": "🏙️ Please enter the city where the exchange should take place.",
+    },
+    "summary": {
+        "ru": "✅ Ваш расчет готов.\n\n🏙️ Город обмена: {city}\n\n📈 Курс обмена:\n1 {from_name} = {rate} {to_name}\n\n💵 Сумма обмена:\n{amount} {from_name}\n\n💶 Сумма к получению:\n{result_amount} {to_name}\n\n🤝 Готовы ли вы поменять деньги?",
+        "en": "✅ Your quote is ready.\n\n🏙️ Exchange city: {city}\n\n📈 Exchange rate:\n1 {from_name} = {rate} {to_name}\n\n💵 Amount to exchange:\n{amount} {from_name}\n\n💶 Amount to receive:\n{result_amount} {to_name}\n\n🤝 Are you ready to exchange the money?",
+    },
+    "request_accepted": {
+        "ru": "🎉 Отлично. Ваша заявка на обмен принята.\n\n🏙️ Город обмена: {city}\n\nВы хотите поменять {amount} {from_name} на {result_amount} {to_name}.\n\n📞 С вами скоро свяжутся для подтверждения.",
+        "en": "🎉 Great. Your exchange request has been accepted.\n\n🏙️ Exchange city: {city}\n\nYou want to exchange {amount} {from_name} for {result_amount} {to_name}.\n\n📞 We will contact you soon to confirm the request.",
+    },
+    "request_cancelled": {
+        "ru": "❌ Заявка отменена.\n\nЕсли захотите, вы сможете оформить новую заявку позже.",
+        "en": "❌ The request has been cancelled.\n\nYou can create a new request later if you want.",
+    },
+    "request_cancelled_alert": {
+        "ru": "Заявка отменена",
+        "en": "Request cancelled",
+    },
+    "confirm_no_message": {
+        "ru": "👌 Хорошо, обмен не оформлен.\n\nВы можете начать новый расчет в любой момент или связаться с нами через раздел контактов.",
+        "en": "👌 Okay, the exchange was not created.\n\nYou can start a new quote at any time or contact us through the contacts section.",
+    },
+    "admin_new_request": {
+        "ru": "Поступила заявка\nАвтор: {author}\nГород обмена: {city}\nНеобходимо обменять: {amount} {from_label}\nНеобходимо выдать: {result_amount} {to_label}\nКурс: {rate}",
+        "en": "New request received\nAuthor: {author}\nExchange city: {city}\nAmount to exchange: {amount} {from_label}\nAmount to give: {result_amount} {to_label}\nRate: {rate}",
+    },
+}
+
+# Базовые курсы через шекель
+RATES_TO_ILS: Dict[str, float] = {
+    "USD": 3.0,        # 1 USD = 3 ILS
+    "ILS": 1.0,        # 1 ILS = 1 ILS
+    "EUR": 4.0,        # 1 EUR = 4 ILS
+    "RUB": 1 / 25,     # 1 RUB = 0.04 ILS
+}
+
+
+def tr(lang: str, key: str, **kwargs) -> str:
+    return TEXTS[key][lang].format(**kwargs)
+
+
+def get_user_language(chat_id: int) -> str:
+    return USER_LANGUAGES.get(chat_id, "ru")
+
+
+def get_currency_name(currency_code: str, lang: str) -> str:
+    return CURRENCIES[currency_code][lang]
+
+
+def get_currency_request_label(currency_code: str, lang: str) -> str:
+    return CURRENCY_REQUEST_LABELS[currency_code][lang]
+
+
+def get_language_inline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=LANGUAGE_LABELS["ru"], callback_data="set_lang:ru"),
+                InlineKeyboardButton(text=LANGUAGE_LABELS["en"], callback_data="set_lang:en"),
+            ]
+        ]
+    )
+
+
+def get_bottom_menu_keyboard(lang: str) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=tr(lang, "restart"))],
+            [KeyboardButton(text=tr(lang, "contacts")), KeyboardButton(text=tr(lang, "cancel"))]
+        ],
+        resize_keyboard=True
+    )
+
+
+def get_restart_inline_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=tr(lang, "restart_inline"), callback_data="restart_flow")]
+        ]
+    )
+
+
+def get_from_currency_inline_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=f"💵 {get_currency_name('USD', lang)}", callback_data="from_USD"),
+                InlineKeyboardButton(text=f"₪ {get_currency_name('ILS', lang)}", callback_data="from_ILS"),
+            ],
+            [
+                InlineKeyboardButton(text=f"💶 {get_currency_name('EUR', lang)}", callback_data="from_EUR"),
+                InlineKeyboardButton(text=f"₽ {get_currency_name('RUB', lang)}", callback_data="from_RUB"),
+            ],
+        ]
+    )
+
+
+def get_to_currency_inline_keyboard(excluded_currency_code: str, lang: str) -> InlineKeyboardMarkup:
+    buttons = []
+
+    for code in CURRENCIES:
+        if code == excluded_currency_code:
+            continue
+        buttons.append(
+            InlineKeyboardButton(
+                text=f"{CURRENCY_EMOJIS[code]} {get_currency_name(code, lang)}",
+                callback_data=f"to_{code}"
+            )
+        )
+
+    rows = []
+    current_row = []
+    for button in buttons:
+        current_row.append(button)
+        if len(current_row) == 2:
+            rows.append(current_row)
+            current_row = []
+
+    if current_row:
+        rows.append(current_row)
+
+    rows.append([InlineKeyboardButton(text=tr(lang, "back"), callback_data="back_to_from")])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_amount_inline_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=tr(lang, "back"), callback_data="back_to_to")]
+        ]
+    )
+
+
+def get_city_inline_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=tr(lang, "back"), callback_data="back_to_amount")]
+        ]
+    )
+
+
+def get_confirmation_inline_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=tr(lang, "confirm_yes"), callback_data="confirm_yes"),
+                InlineKeyboardButton(text=tr(lang, "confirm_no"), callback_data="confirm_no"),
+            ],
+            [
+                InlineKeyboardButton(text=tr(lang, "back"), callback_data="back_to_city")
+            ]
+        ]
+    )
+
+
+def get_cancel_request_inline_keyboard(admin_message_id: int, lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=tr(lang, "cancel_request"),
+                    callback_data=f"cancel_request:{admin_message_id}"
+                )
+            ]
+        ]
+    )
+
+
+def parse_amount(amount_text: str) -> Optional[float]:
+    """
+    Допустимые форматы:
+    999
+    1000
+    12567
+    12567.50
+    100000.75
+
+    Правила:
+    - без пробелов
+    - точка только для дробной части
+    - максимум 2 знака после точки
+    """
+    text = amount_text.strip()
+    pattern = r"^\d+(\.\d{1,2})?$"
+
+    if not re.fullmatch(pattern, text):
+        return None
+
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+
+    if value <= 0:
+        return None
+
+    return value
+
+
+def format_number(value: float) -> str:
+    if float(value).is_integer():
+        return f"{int(value):,}".replace(",", " ")
+    return f"{value:,.2f}".replace(",", " ")
+
+
+def get_exchange_rate(from_currency: str, to_currency: str) -> float:
+    from_in_ils = RATES_TO_ILS[from_currency]
+    to_in_ils = RATES_TO_ILS[to_currency]
+    return from_in_ils / to_in_ils
+
+
+def get_request_author(callback: CallbackQuery) -> str:
+    username = callback.from_user.username
+    if username:
+        return f"@{username}"
+    return callback.from_user.full_name
+
+
+async def delete_message_safe(chat_id: int, message_id: Optional[int]):
+    if not message_id:
+        return
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
+async def remove_message_markup_safe(chat_id: int, message_id: Optional[int]):
+    if not message_id:
+        return
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=None
+        )
+    except Exception:
+        pass
+
+
+async def clear_flow_messages(chat_id: int, state: FSMContext):
+    data = await state.get_data()
+
+    await delete_message_safe(chat_id, data.get("from_prompt_message_id"))
+    await delete_message_safe(chat_id, data.get("to_prompt_message_id"))
+    await delete_message_safe(chat_id, data.get("amount_prompt_message_id"))
+    await delete_message_safe(chat_id, data.get("city_prompt_message_id"))
+    await delete_message_safe(chat_id, data.get("summary_message_id"))
+    await delete_message_safe(chat_id, data.get("user_amount_message_id"))
+    await delete_message_safe(chat_id, data.get("user_city_message_id"))
+
+
+async def freeze_flow_messages(chat_id: int, state: FSMContext):
+    data = await state.get_data()
+
+    await remove_message_markup_safe(chat_id, data.get("from_prompt_message_id"))
+    await remove_message_markup_safe(chat_id, data.get("to_prompt_message_id"))
+    await remove_message_markup_safe(chat_id, data.get("amount_prompt_message_id"))
+    await remove_message_markup_safe(chat_id, data.get("city_prompt_message_id"))
+    await remove_message_markup_safe(chat_id, data.get("summary_message_id"))
+
+
+async def notify_admin_about_request(
+    callback: CallbackQuery,
+    from_currency: str,
+    to_currency: str,
+    amount: float,
+    result_amount: float,
+    rate: float,
+    city: str,
+    lang: str,
+) -> Optional[int]:
+    text = tr(
+        lang,
+        "admin_new_request",
+        author=get_request_author(callback),
+        city=city,
+        amount=format_number(amount),
+        from_label=get_currency_request_label(from_currency, lang),
+        result_amount=format_number(result_amount),
+        to_label=get_currency_request_label(to_currency, lang),
+        rate=rate,
+    )
+
+    try:
+        sent = await bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
+        return sent.message_id
+    except Exception:
+        return None
+
+
+async def show_contacts_message(message: Message, lang: str):
+    text = tr(lang, "contacts_message", telegram=CONTACT_TELEGRAM, email=CONTACT_EMAIL)
+    await message.answer(text, reply_markup=get_bottom_menu_keyboard(lang))
+
+
+async def show_main_menu(message: Message, lang: str, text: Optional[str] = None):
+    if text is None:
+        text = tr(lang, "welcome")
+
+    await message.answer(text, reply_markup=get_bottom_menu_keyboard(lang))
+
+
+async def start_exchange_flow(message: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(ExchangeStates.choosing_from_currency)
+    lang = get_user_language(message.chat.id)
+
+    sent = await message.answer(
+        tr(lang, "choose_from_currency"),
+        reply_markup=get_from_currency_inline_keyboard(lang)
+    )
+
+    await state.update_data(
+        from_prompt_message_id=sent.message_id,
+        to_prompt_message_id=None,
+        amount_prompt_message_id=None,
+        city_prompt_message_id=None,
+        summary_message_id=None,
+        user_amount_message_id=None,
+        user_city_message_id=None,
+        from_currency=None,
+        to_currency=None,
+        amount=None,
+        rate=None,
+        result_amount=None,
+        city=None,
+    )
+
+
+@dp.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        tr("ru", "choose_language"),
+        reply_markup=get_language_inline_keyboard()
+    )
+
+
+@dp.callback_query(F.data.startswith("set_lang:"))
+async def set_language(callback: CallbackQuery, state: FSMContext):
+    lang = callback.data.split(":")[1]
+    USER_LANGUAGES[callback.message.chat.id] = lang
+
+    await state.clear()
+    await show_main_menu(callback.message, lang)
+    await start_exchange_flow(callback.message, state)
+    await callback.answer()
+
+
+@dp.message(F.text.in_([TEXTS["restart"]["ru"], TEXTS["restart"]["en"]]))
+async def handle_restart(message: Message, state: FSMContext):
+    lang = get_user_language(message.chat.id)
+    await clear_flow_messages(message.chat.id, state)
+    await state.clear()
+
+    await message.answer(
+        tr(lang, "restart_message"),
+        reply_markup=get_bottom_menu_keyboard(lang)
+    )
+    await start_exchange_flow(message, state)
+
+
+@dp.callback_query(F.data == "restart_flow")
+async def handle_restart_inline(callback: CallbackQuery, state: FSMContext):
+    lang = get_user_language(callback.message.chat.id)
+    await clear_flow_messages(callback.message.chat.id, state)
+    await state.clear()
+
+    await callback.message.answer(
+        tr(lang, "restart_message"),
+        reply_markup=get_bottom_menu_keyboard(lang)
+    )
+    await start_exchange_flow(callback.message, state)
+    await callback.answer()
+
+
+@dp.message(F.text.in_([TEXTS["cancel"]["ru"], TEXTS["cancel"]["en"]]))
+async def handle_cancel(message: Message, state: FSMContext):
+    await freeze_flow_messages(message.chat.id, state)
+    await state.clear()
+
+
+@dp.message(F.text.in_([TEXTS["contacts"]["ru"], TEXTS["contacts"]["en"]]))
+async def handle_contacts(message: Message):
+    await show_contacts_message(message, get_user_language(message.chat.id))
+
+
+@dp.callback_query(F.data.startswith("from_"))
+async def choose_from_currency(callback: CallbackQuery, state: FSMContext):
+    from_currency_code = callback.data.split("_")[1]
+    lang = get_user_language(callback.message.chat.id)
+
+    await state.update_data(from_currency=from_currency_code)
+    await state.set_state(ExchangeStates.choosing_to_currency)
+
+    sent = await callback.message.answer(
+        tr(lang, "choose_to_currency"),
+        reply_markup=get_to_currency_inline_keyboard(from_currency_code, lang)
+    )
+    await state.update_data(to_prompt_message_id=sent.message_id)
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("to_"))
+async def choose_to_currency(callback: CallbackQuery, state: FSMContext):
+    to_currency_code = callback.data.split("_")[1]
+    data = await state.get_data()
+    from_currency_code = data.get("from_currency")
+    lang = get_user_language(callback.message.chat.id)
+
+    if to_currency_code == from_currency_code:
+        await callback.answer(tr(lang, "same_currency_error"), show_alert=True)
+        return
+
+    await state.update_data(to_currency=to_currency_code)
+    await state.set_state(ExchangeStates.entering_amount)
+
+    sent = await callback.message.answer(
+        tr(lang, "amount_prompt"),
+        reply_markup=get_amount_inline_keyboard(lang)
+    )
+    await state.update_data(amount_prompt_message_id=sent.message_id)
+
+    await callback.answer()
+
+
+@dp.message(ExchangeStates.entering_amount)
+async def enter_amount(message: Message, state: FSMContext):
+    lang = get_user_language(message.chat.id)
+    amount = parse_amount(message.text)
+
+    if amount is None:
+        await message.answer(
+            tr(lang, "amount_invalid"),
+            reply_markup=get_bottom_menu_keyboard(lang)
+        )
+        return
+
+    data = await state.get_data()
+    from_currency = data["from_currency"]
+    to_currency = data["to_currency"]
+
+    rate = get_exchange_rate(from_currency, to_currency)
+    result_amount = amount * rate
+
+    await state.update_data(
+        amount=amount,
+        rate=rate,
+        result_amount=result_amount,
+        user_amount_message_id=message.message_id
+    )
+    await state.set_state(ExchangeStates.entering_city)
+
+    sent = await message.answer(
+        tr(lang, "city_prompt"),
+        reply_markup=get_city_inline_keyboard(lang)
+    )
+    await state.update_data(city_prompt_message_id=sent.message_id)
+
+
+@dp.message(ExchangeStates.entering_city)
+async def enter_city(message: Message, state: FSMContext):
+    lang = get_user_language(message.chat.id)
+    city = message.text.strip()
+
+    if not city:
+        await message.answer(
+            tr(lang, "city_invalid"),
+            reply_markup=get_bottom_menu_keyboard(lang)
+        )
+        return
+
+    data = await state.get_data()
+    from_currency = data["from_currency"]
+    to_currency = data["to_currency"]
+    amount = data["amount"]
+    rate = data["rate"]
+    result_amount = data["result_amount"]
+
+    from_name = get_currency_name(from_currency, lang)
+    to_name = get_currency_name(to_currency, lang)
+
+    await state.update_data(
+        city=city,
+        user_city_message_id=message.message_id
+    )
+    await state.set_state(ExchangeStates.confirming_exchange)
+
+    sent = await message.answer(
+        tr(
+            lang,
+            "summary",
+            city=city,
+            from_name=from_name,
+            rate=format_number(rate),
+            to_name=to_name,
+            amount=format_number(amount),
+            result_amount=format_number(result_amount),
+        ),
+        reply_markup=get_confirmation_inline_keyboard(lang)
+    )
+
+    await state.update_data(summary_message_id=sent.message_id)
+
+
+@dp.callback_query(F.data == "back_to_from")
+async def back_to_from(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+
+    await delete_message_safe(callback.message.chat.id, data.get("to_prompt_message_id"))
+
+    await state.update_data(
+        to_prompt_message_id=None,
+        from_currency=data.get("from_currency"),
+        to_currency=None,
+        amount=None,
+        rate=None,
+        result_amount=None,
+        user_amount_message_id=None,
+        summary_message_id=None
+    )
+    await state.set_state(ExchangeStates.choosing_from_currency)
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "back_to_to")
+async def back_to_to(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+
+    await delete_message_safe(callback.message.chat.id, data.get("amount_prompt_message_id"))
+
+    await state.update_data(
+        amount_prompt_message_id=None,
+        to_currency=None,
+        amount=None,
+        rate=None,
+        result_amount=None,
+        user_amount_message_id=None,
+        city_prompt_message_id=None,
+        user_city_message_id=None,
+        city=None,
+        summary_message_id=None
+    )
+    await state.set_state(ExchangeStates.choosing_to_currency)
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "back_to_amount")
+async def back_to_amount(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+
+    await delete_message_safe(callback.message.chat.id, data.get("city_prompt_message_id"))
+
+    await state.update_data(
+        city_prompt_message_id=None,
+        user_city_message_id=None,
+        city=None
+    )
+    await state.set_state(ExchangeStates.entering_amount)
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "back_to_city")
+async def back_to_city(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+
+    await delete_message_safe(callback.message.chat.id, data.get("summary_message_id"))
+    await delete_message_safe(callback.message.chat.id, data.get("user_city_message_id"))
+
+    await state.update_data(
+        summary_message_id=None,
+        user_city_message_id=None,
+        city=None
+    )
+    await state.set_state(ExchangeStates.entering_city)
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "confirm_yes")
+async def confirm_yes(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    lang = get_user_language(callback.message.chat.id)
+    from_currency = data["from_currency"]
+    to_currency = data["to_currency"]
+    amount = data["amount"]
+    rate = data["rate"]
+    result_amount = data["result_amount"]
+    city = data["city"]
+
+    await state.clear()
+    admin_message_id = await notify_admin_about_request(
+        callback=callback,
+        from_currency=from_currency,
+        to_currency=to_currency,
+        amount=amount,
+        result_amount=result_amount,
+        rate=rate,
+        city=city,
+        lang=lang,
+    )
+    await callback.message.answer(
+        tr(
+            lang,
+            "request_accepted",
+            city=city,
+            amount=format_number(amount),
+            from_name=get_currency_name(from_currency, lang),
+            result_amount=format_number(result_amount),
+            to_name=get_currency_name(to_currency, lang),
+        ),
+        reply_markup=(
+            get_cancel_request_inline_keyboard(admin_message_id, lang)
+            if admin_message_id
+            else None
+        )
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("cancel_request:"))
+async def cancel_request(callback: CallbackQuery):
+    lang = get_user_language(callback.message.chat.id)
+    admin_message_id = int(callback.data.split(":")[1])
+    await delete_message_safe(ADMIN_CHAT_ID, admin_message_id)
+    await callback.message.edit_text(
+        tr(lang, "request_cancelled")
+    )
+    await callback.answer(tr(lang, "request_cancelled_alert"))
+
+
+@dp.callback_query(F.data == "confirm_no")
+async def confirm_no(callback: CallbackQuery, state: FSMContext):
+    lang = get_user_language(callback.message.chat.id)
+    await state.clear()
+    await callback.message.answer(
+        tr(lang, "confirm_no_message"),
+        reply_markup=get_bottom_menu_keyboard(lang)
+    )
+    await callback.answer()
+
+
+async def main():
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
