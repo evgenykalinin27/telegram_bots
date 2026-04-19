@@ -15,12 +15,12 @@ from aiogram.types import (
     CallbackQuery,
 )
 
-TOKEN = "ВСТАВИТЬ_СВОЙ_ТОКЕН"
+TOKEN = "INSERT_YOUR_TOKEN"
 
 # Замени на свои реальные контакты
 CONTACT_TELEGRAM = "@xxx"
 CONTACT_EMAIL = "yourmail@example.com"
-ADMIN_CHAT_ID = CHAT_ID_ЧАТА  # chat_id пользователя @zhenyakalinin
+ADMIN_CHAT_ID = CHAT_ID  # chat_id пользователя @zhenyakalinin
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
