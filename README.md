@@ -1,4 +1,4 @@
-# 1. Shai_Exchange_bot
+# 1. Exchange_bot
 My first ever created bot. 
 This is a bot for calculating currency exchange and collecting a client request for my friend.
 
