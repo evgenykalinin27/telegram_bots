@@ -15,4 +15,5 @@ This is a bot for calculating currency exchange and collecting a client request 
 ## Tech Stack
 - Python
 - aiogram
+
 Written by Codex, explained by me :)
