@@ -21,7 +21,7 @@ This is a bot for calculating currency exchange and collecting a client request 
 Written by Codex, explained by me
 
 -----------------------------------------------------------------------------------------------------
-# 2. Converter bot (to_convert)
+# 2. Converter bot (to.convert)
 This is a bot for converting files (first version converts docs -> pdf and back)
 
 ## Features
