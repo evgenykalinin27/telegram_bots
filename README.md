@@ -21,7 +21,7 @@ This is a bot for calculating currency exchange and collecting a client request 
 Written by Codex, explained by me
 
 -----------------------------------------------------------------------------------------------------
-# 2. Converter bot (to.convert)
+# 2. Converter bot (to.convert) (Temporary, upgrade soon)
 This is a bot for converting files (first version converts docs -> pdf and back)
 
 ## Features
@@ -38,7 +38,7 @@ This is a bot for converting files (first version converts docs -> pdf and back)
 Written by Codex, explained by me
 
 -----------------------------------------------------------------------------------------------------
-# 3. Find Synagogue bot
+# 3. Find Synagogue bot (Temporary, upgrade soon)
 This is a bot for finding a Synagogue in every city
 
 There is 2 versions of this bots:
