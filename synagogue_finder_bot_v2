@@ -1,0 +1,638 @@
+import asyncio
+import json
+import logging
+import math
+import os
+import socket
+import ssl
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Location,
+    Message,
+    ReplyKeyboardMarkup,
+)
+
+import certifi
+
+
+def load_local_env_file() -> None:
+    env_path = Path(__file__).with_name(".env")
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+load_local_env_file()
+
+
+BOT_TOKEN = os.getenv("SYNAGOGUE_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN_FALLBACK = ""
+if not BOT_TOKEN and BOT_TOKEN_FALLBACK:
+    BOT_TOKEN = BOT_TOKEN_FALLBACK
+
+HELP_CONTACT = "@your_support_contact"
+HTTP_USER_AGENT = "SynagogueFinderBot/1.0 (contact: @your_support_contact)"
+GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY")
+GOOGLE_PLACES_TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+GOOGLE_PLACES_FIELD_MASK = ",".join(
+    [
+        "places.displayName",
+        "places.location",
+        "places.googleMapsUri",
+    ]
+)
+
+CITY_MOSCOW = "Москва"
+CITY_MOSCOW_ENGLISH = "Moscow"
+MANUAL_CITY_BUTTON = "Ввести город самостоятельно"
+RESTART_BUTTON = "Начать сначала"
+HELP_BUTTON = "Помощь"
+SHARE_LOCATION_BUTTON = "Отправить геопозицию"
+MAX_RESULTS = 15
+NEAREST_RESULTS = 5
+
+
+class SynagogueFinderStates(StatesGroup):
+    choosing_city = State()
+    entering_city_manually = State()
+    deciding_location = State()
+
+
+@dataclass
+class SynagoguePlace:
+    name: str
+    lat: float
+    lon: float
+    google_maps_url: str
+
+    @property
+    def waze_url(self) -> str:
+        return f"https://www.waze.com/ul?ll={self.lat},{self.lon}&navigate=yes"
+
+
+dp = Dispatcher()
+
+
+def get_bottom_menu_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=RESTART_BUTTON), KeyboardButton(text=HELP_BUTTON)],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def get_location_inline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Показать общий список", callback_data="location:skip")],
+        ]
+    )
+
+
+def get_share_location_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=SHARE_LOCATION_BUTTON, request_location=True)],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def get_city_inline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=CITY_MOSCOW, callback_data="city:moscow")],
+            [InlineKeyboardButton(text=MANUAL_CITY_BUTTON, callback_data="city:manual")],
+        ]
+    )
+
+
+def get_synagogue_links_keyboard(synagogue: SynagoguePlace) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Google Maps", url=synagogue.google_maps_url)],
+            [InlineKeyboardButton(text="Waze", url=synagogue.waze_url)],
+        ]
+    )
+
+
+def normalize_city_name(city_name: str) -> str:
+    normalized = city_name.strip().lower()
+    aliases = {
+        "москва": CITY_MOSCOW_ENGLISH.lower(),
+        "moscow": CITY_MOSCOW_ENGLISH.lower(),
+    }
+    return aliases.get(normalized, city_name.strip())
+
+
+def fetch_json(
+    url: str,
+    method: str = "GET",
+    body: bytes | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> Any:
+    headers = {
+        "User-Agent": HTTP_USER_AGENT,
+        "Accept": "application/json",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+
+    request = Request(
+        url,
+        data=body,
+        method=method,
+        headers=headers,
+    )
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    with urlopen(request, timeout=30, context=ssl_context) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_synagogues_for_city(city_name: str) -> list[SynagoguePlace]:
+    if not GOOGLE_PLACES_API_KEY:
+        raise RuntimeError("GOOGLE_PLACES_API_KEY_MISSING")
+
+    normalized_city = normalize_city_name(city_name)
+    payload = {
+        "textQuery": f"synagogues in {normalized_city}",
+        "includedType": "synagogue",
+        "languageCode": "en",
+        "maxResultCount": MAX_RESULTS,
+    }
+    response = fetch_json(
+        GOOGLE_PLACES_TEXT_SEARCH_URL,
+        method="POST",
+        body=json.dumps(payload).encode("utf-8"),
+        extra_headers={
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
+            "X-Goog-FieldMask": GOOGLE_PLACES_FIELD_MASK,
+        },
+    )
+
+    places = response.get("places", [])
+    if not places:
+        return []
+
+    unique_places: dict[str, SynagoguePlace] = {}
+    for place in places:
+        display_name = place.get("displayName", {})
+        location = place.get("location", {})
+        name = display_name.get("text")
+        lat = location.get("latitude")
+        lon = location.get("longitude")
+        google_maps_url = place.get("googleMapsUri")
+
+        if not name or lat is None or lon is None:
+            continue
+
+        if not google_maps_url:
+            google_maps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+
+        unique_places[name.casefold()] = SynagoguePlace(
+            name=name,
+            lat=float(lat),
+            lon=float(lon),
+            google_maps_url=google_maps_url,
+        )
+
+    return sorted(unique_places.values(), key=lambda place: place.name.lower())
+
+
+def build_fetch_error_message(error: Exception) -> str:
+    if isinstance(error, RuntimeError) and str(error) == "GOOGLE_PLACES_API_KEY_MISSING":
+        return "Не задан GOOGLE_PLACES_API_KEY. Добавьте ключ Google Places API в переменные окружения."
+
+    if isinstance(error, HTTPError):
+        try:
+            error_body = error.read().decode("utf-8", errors="replace")
+        except Exception:
+            error_body = ""
+
+        if error.code in (401, 403):
+            base_message = (
+                "Google Places API отклонил запрос. Проверьте API key, включен ли Places API "
+                "и подключен ли billing в Google Cloud."
+            )
+            if error_body:
+                return f"{base_message}\n\nОтвет Google:\n{error_body[:1000]}"
+            return base_message
+
+        if error_body:
+            return (
+                f"Сервис карт вернул ошибку HTTP {error.code}."
+                f"\n\nОтвет Google:\n{error_body[:1000]}"
+            )
+        return f"Сервис карт вернул ошибку HTTP {error.code}. Попробуйте еще раз чуть позже."
+
+    if isinstance(error, URLError):
+        reason = error.reason
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            return (
+                "Python не может проверить SSL-сертификат Google Places API. "
+                "На macOS это обычно решается установкой сертификатов для Python."
+            )
+        if isinstance(reason, socket.gaierror):
+            return "Не удалось разрешить адрес Google Places API. Проверьте DNS или интернет-соединение."
+        return f"Сетевой запрос к Google Places API не удался: {reason}"
+
+    return "Не удалось получить актуальный список синагог. Попробуйте еще раз позже."
+
+
+def calculate_distance_km(
+    user_lat: float,
+    user_lon: float,
+    place_lat: float,
+    place_lon: float,
+) -> float:
+    radius_km = 6371.0
+    lat1 = math.radians(user_lat)
+    lon1 = math.radians(user_lon)
+    lat2 = math.radians(place_lat)
+    lon2 = math.radians(place_lon)
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return radius_km * c
+
+
+def serialize_synagogues(synagogues: list[SynagoguePlace]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": synagogue.name,
+            "lat": synagogue.lat,
+            "lon": synagogue.lon,
+            "google_maps_url": synagogue.google_maps_url,
+        }
+        for synagogue in synagogues
+    ]
+
+
+def deserialize_synagogues(items: list[dict[str, Any]]) -> list[SynagoguePlace]:
+    return [
+        SynagoguePlace(
+            name=item["name"],
+            lat=float(item["lat"]),
+            lon=float(item["lon"]),
+            google_maps_url=item["google_maps_url"],
+        )
+        for item in items
+    ]
+
+
+def serialize_nearest_synagogues(items: list[tuple[SynagoguePlace, float]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": synagogue.name,
+            "lat": synagogue.lat,
+            "lon": synagogue.lon,
+            "google_maps_url": synagogue.google_maps_url,
+            "distance_km": distance_km,
+        }
+        for synagogue, distance_km in items
+    ]
+
+
+def deserialize_nearest_synagogues(items: list[dict[str, Any]]) -> list[tuple[SynagoguePlace, float]]:
+    return [
+        (
+            SynagoguePlace(
+                name=item["name"],
+                lat=float(item["lat"]),
+                lon=float(item["lon"]),
+                google_maps_url=item["google_maps_url"],
+            ),
+            float(item["distance_km"]),
+        )
+        for item in items
+    ]
+
+
+def get_nearest_synagogues_inline_keyboard(
+    nearest_synagogues: list[tuple[SynagoguePlace, float]],
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{synagogue.name} ({distance_km:.1f} км)",
+                    callback_data=f"synagogue:{index}",
+                )
+            ]
+            for index, (synagogue, distance_km) in enumerate(nearest_synagogues)
+        ]
+    )
+
+
+def get_synagogues_inline_keyboard(synagogues: list[SynagoguePlace]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=synagogue.name,
+                    callback_data=f"general_synagogue:{index}",
+                )
+            ]
+            for index, synagogue in enumerate(synagogues)
+        ]
+    )
+
+
+def build_nearest_synagogues_message(
+    city_name: str,
+    synagogues: list[SynagoguePlace],
+    user_location: Location,
+) -> tuple[str, list[tuple[SynagoguePlace, float]]]:
+    ranked_synagogues = sorted(
+        synagogues,
+        key=lambda synagogue: calculate_distance_km(
+            user_location.latitude,
+            user_location.longitude,
+            synagogue.lat,
+            synagogue.lon,
+        ),
+    )
+    nearest_synagogues = [
+        (
+            synagogue,
+            calculate_distance_km(
+                user_location.latitude,
+                user_location.longitude,
+                synagogue.lat,
+                synagogue.lon,
+            ),
+        )
+        for synagogue in ranked_synagogues[:NEAREST_RESULTS]
+    ]
+
+    message = (
+        f"Ближайшие синагоги в городе {city_name}:\n\n"
+        "Выберите синагогу из списка ниже."
+    )
+    return message, nearest_synagogues
+
+
+def build_synagogue_details_message(synagogue: SynagoguePlace, distance_km: float) -> str:
+    return (
+        f"{synagogue.name}\n\n"
+        f"Расстояние: {distance_km:.1f} км\n"
+        "Выберите удобный сервис для построения маршрута."
+    )
+
+
+async def show_city_selection(message: Message, state: FSMContext) -> None:
+    await state.set_state(SynagogueFinderStates.choosing_city)
+    await message.answer(
+        "Шалом! Я помогу найти синагогу в нужном городе.\n"
+        "Выберите город из списка или введите его вручную.",
+        reply_markup=get_city_inline_keyboard(),
+    )
+
+
+async def send_help_message(message: Message) -> None:
+    await message.answer(
+        f"По всем вопросам можно связаться: {HELP_CONTACT}",
+        reply_markup=get_bottom_menu_keyboard(),
+    )
+
+
+async def fetch_city_synagogues(message: Message, state: FSMContext, city_name: str) -> None:
+    waiting_message = await message.answer(
+        "Ищу актуальные синагоги. Это может занять несколько секунд.",
+        reply_markup=get_bottom_menu_keyboard(),
+    )
+
+    try:
+        synagogues = await asyncio.to_thread(fetch_synagogues_for_city, city_name)
+    except Exception as error:
+        logging.exception("Failed to fetch synagogues")
+        await waiting_message.answer(
+            build_fetch_error_message(error),
+            reply_markup=get_bottom_menu_keyboard(),
+        )
+        return
+
+    if not synagogues:
+        await waiting_message.answer(
+            "Google Places API не вернул синагоги для этого города. Попробуйте другой город или другую форму написания.",
+            reply_markup=get_bottom_menu_keyboard(),
+        )
+        return
+
+    await state.update_data(
+        selected_city=city_name,
+        synagogues=serialize_synagogues(synagogues),
+    )
+    await state.set_state(SynagogueFinderStates.deciding_location)
+    await waiting_message.answer(
+        "Хотите поделиться геопозицией, чтобы я показал 5 ближайших синагог?\n"
+        "Поделиться геопозицией можно только с телефона.\n"
+        "Нажмите кнопку «Отправить геопозицию» внизу или выберите общий список.",
+        reply_markup=get_location_inline_keyboard(),
+    )
+    await waiting_message.answer(
+        "Кнопка отправки геопозиции доступна в нижней панели.",
+        reply_markup=get_share_location_keyboard(),
+    )
+
+
+@dp.message(CommandStart())
+async def handle_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await show_city_selection(message, state)
+
+
+@dp.message(F.text == RESTART_BUTTON)
+async def handle_restart(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Возвращаюсь к выбору города.")
+    await show_city_selection(message, state)
+
+
+@dp.message(F.text == HELP_BUTTON)
+async def handle_help(message: Message) -> None:
+    await send_help_message(message)
+
+
+@dp.callback_query(F.data == "city:moscow")
+async def handle_city_from_list(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await fetch_city_synagogues(callback.message, state, CITY_MOSCOW_ENGLISH)
+
+
+@dp.callback_query(F.data == "city:manual")
+async def handle_manual_city_request(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(SynagogueFinderStates.entering_city_manually)
+    await callback.message.answer(
+        'Введите город вручную в формате "Tel Aviv".',
+        reply_markup=get_bottom_menu_keyboard(),
+    )
+
+
+@dp.message(SynagogueFinderStates.entering_city_manually, F.text)
+async def handle_manual_city_input(message: Message, state: FSMContext) -> None:
+    await fetch_city_synagogues(message, state, message.text.strip())
+
+
+@dp.callback_query(F.data == "location:skip")
+async def handle_skip_location(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    city_name = data.get("selected_city", CITY_MOSCOW_ENGLISH)
+    synagogues = deserialize_synagogues(data.get("synagogues", []))
+    await callback.answer()
+    await state.set_state(SynagogueFinderStates.choosing_city)
+    await callback.message.answer(
+        f"Актуальные синагоги в городе {city_name}:\n\nВыберите синагогу из списка ниже.",
+        reply_markup=get_synagogues_inline_keyboard(synagogues),
+    )
+    await callback.message.answer(
+        "Чтобы начать заново или открыть помощь, используйте кнопки ниже.",
+        reply_markup=get_bottom_menu_keyboard(),
+    )
+
+
+@dp.message(SynagogueFinderStates.deciding_location, F.location)
+async def handle_location(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    city_name = data.get("selected_city", CITY_MOSCOW_ENGLISH)
+    synagogues = deserialize_synagogues(data.get("synagogues", []))
+    nearest_message, nearest_synagogues = build_nearest_synagogues_message(
+        city_name,
+        synagogues,
+        message.location,
+    )
+    await state.update_data(nearest_synagogues=serialize_nearest_synagogues(nearest_synagogues))
+    await state.set_state(SynagogueFinderStates.choosing_city)
+    await message.answer(
+        nearest_message,
+        reply_markup=get_nearest_synagogues_inline_keyboard(nearest_synagogues),
+        disable_web_page_preview=True,
+    )
+    await message.answer(
+        "Чтобы выбрать другой сценарий, используйте кнопки ниже.",
+        reply_markup=get_bottom_menu_keyboard(),
+    )
+
+
+@dp.callback_query(F.data.startswith("synagogue:"))
+async def handle_synagogue_details(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    nearest_synagogues = deserialize_nearest_synagogues(data.get("nearest_synagogues", []))
+
+    try:
+        synagogue_index = int(callback.data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        await callback.answer("Не удалось открыть синагогу.", show_alert=True)
+        return
+
+    if synagogue_index < 0 or synagogue_index >= len(nearest_synagogues):
+        await callback.answer("Список устарел. Выберите город заново.", show_alert=True)
+        return
+
+    synagogue, distance_km = nearest_synagogues[synagogue_index]
+    await callback.answer()
+    await callback.message.answer(
+        build_synagogue_details_message(synagogue, distance_km),
+        reply_markup=get_synagogue_links_keyboard(synagogue),
+        disable_web_page_preview=True,
+    )
+
+
+@dp.callback_query(F.data.startswith("general_synagogue:"))
+async def handle_general_synagogue_details(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    synagogues = deserialize_synagogues(data.get("synagogues", []))
+
+    try:
+        synagogue_index = int(callback.data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        await callback.answer("Не удалось открыть синагогу.", show_alert=True)
+        return
+
+    if synagogue_index < 0 or synagogue_index >= len(synagogues):
+        await callback.answer("Список устарел. Выберите город заново.", show_alert=True)
+        return
+
+    synagogue = synagogues[synagogue_index]
+    await callback.answer()
+    await callback.message.answer(
+        synagogue.name,
+        reply_markup=get_synagogue_links_keyboard(synagogue),
+        disable_web_page_preview=True,
+    )
+
+
+@dp.message(SynagogueFinderStates.deciding_location, F.text)
+async def handle_location_prompt_text(message: Message) -> None:
+    await message.answer(
+        "Чтобы получить ближайшие синагоги, нажмите кнопку «Отправить геопозицию» внизу.\n"
+        "Если геопозицию отправлять не хотите, используйте inline-кнопку «Показать общий список».",
+        reply_markup=get_share_location_keyboard(),
+    )
+
+
+@dp.message(SynagogueFinderStates.choosing_city, F.text)
+async def handle_unknown_city_choice(message: Message) -> None:
+    await message.answer(
+        "Выберите город через inline-кнопки в сообщении выше или нажмите «Начать сначала».",
+        reply_markup=get_bottom_menu_keyboard(),
+    )
+
+
+@dp.message()
+async def handle_fallback(message: Message, state: FSMContext) -> None:
+    current_state = await state.get_state()
+    if current_state == SynagogueFinderStates.entering_city_manually.state:
+        await message.answer(
+            'Введите город текстом, например: "Moscow" или "Tel Aviv".',
+            reply_markup=get_bottom_menu_keyboard(),
+        )
+        return
+
+    await show_city_selection(message, state)
+
+
+async def main() -> None:
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "Bot token is not configured. Set SYNAGOGUE_BOT_TOKEN or TELEGRAM_BOT_TOKEN."
+        )
+
+    logging.basicConfig(level=logging.INFO)
+    bot = Bot(token=BOT_TOKEN)
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
