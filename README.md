@@ -47,8 +47,11 @@ v2 is a version where bot takes data from Google Maps but to make this type of c
 At the beginning it's free to use but in future i'll have to pay for API KEY usage.
 
 ## Features
+- lets user choose the language
 - lets users choose the city
-- bot takes the data from Google maps and shows the exact places where Synagogue is located with the link to Google Maps and Waze
+- bot takes the data from the Source and shows the exact places where Synagogue is located with the link to Google Maps and Waze
+it also find synagogues near you by using your location if you like.
+
 
 ## Tech Stack
 - Python
