@@ -18,8 +18,6 @@ This is a bot for calculating currency exchange and collecting a client request 
 - Python
 - aiogram
 
-Written by Codex, explained by me
-
 -----------------------------------------------------------------------------------------------------
 # 2. Converter bot (to.convert) (Temporary, upgrade soon)
 This is a bot for converting files (first version converts docs -> pdf and back)
@@ -34,8 +32,6 @@ This is a bot for converting files (first version converts docs -> pdf and back)
 ## Tech Stack
 - Python
 - aiogram
-
-Written by Codex, explained by me
 
 -----------------------------------------------------------------------------------------------------
 # 3. Find Synagogue bot (Temporary, upgrade soon)
@@ -57,4 +53,3 @@ it also find synagogues near you by using your location if you like.
 - Python
 - aiogram
 
-Written by Codex, explained by me
