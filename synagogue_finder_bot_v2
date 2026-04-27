@@ -1,14 +1,17 @@
-import json
 import asyncio
+import html
+import json
 import logging
 import math
 import os
+import re
 import socket
 import ssl
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode, urljoin
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -21,8 +24,10 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
+    LabeledPrice,
     Location,
     Message,
+    PreCheckoutQuery,
     ReplyKeyboardMarkup,
 )
 
@@ -54,12 +59,14 @@ BOT_TOKEN_FALLBACK = ""
 if not BOT_TOKEN and BOT_TOKEN_FALLBACK:
     BOT_TOKEN = BOT_TOKEN_FALLBACK
 
-HELP_CONTACT = "@your_support_contact"
+HELP_CONTACT = "@architector_isr"
 TZDAKA_CARD_NUMBER = "0000 0000 0000 0000"
 HTTP_USER_AGENT = "SynagogueFinderBot/1.0 (contact: @your_support_contact)"
 GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY")
 GOOGLE_PLACES_TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 GOOGLE_PLACE_DETAILS_URL = "https://places.googleapis.com/v1/places"
+CHABAD_BASE_URL = "https://www.chabad.org"
+CHABAD_SEARCH_URL = f"{CHABAD_BASE_URL}/jewish-centers/search"
 GOOGLE_PLACES_FIELD_MASK = ",".join(
     [
         "places.id",
@@ -76,18 +83,23 @@ CITY_MOSCOW = "Москва"
 CITY_MOSCOW_ENGLISH = "Moscow"
 CITY_TEL_AVIV = "Тель-Авив"
 CITY_TEL_AVIV_ENGLISH = "Tel Aviv"
+CITY_NEW_YORK = "Нью-Йорк"
+CITY_NEW_YORK_ENGLISH = "New York"
 CITY_SAINT_PETERSBURG_ENGLISH = "Saint Petersburg"
 MAX_RESULTS = 15
 NEAREST_RESULTS = 5
 LOCATION_CACHE_TTL_SECONDS = 300
+MAX_CHABAD_RESULTS = 20
 
 CITY_CALLBACKS = {
     "city:moscow": CITY_MOSCOW_ENGLISH,
     "city:tel_aviv": CITY_TEL_AVIV_ENGLISH,
+    "city:new_york": CITY_NEW_YORK_ENGLISH,
 }
 CITY_SEARCH_QUERIES = {
     CITY_MOSCOW_ENGLISH: "Moscow, Russia",
     CITY_TEL_AVIV_ENGLISH: "Tel Aviv, Israel",
+    CITY_NEW_YORK_ENGLISH: "New York, USA",
     CITY_SAINT_PETERSBURG_ENGLISH: "Saint Petersburg, Russia",
 }
 LANGUAGE_LABELS = {
@@ -98,11 +110,14 @@ LANGUAGE_LABELS = {
 CITY_LABELS = {
     "city:moscow": {"ru": "Москва", "en": "Moscow", "he": "מוסקבה"},
     "city:tel_aviv": {"ru": "Тель-Авив", "en": "Tel Aviv", "he": "תל אביב"},
+    "city:new_york": {"ru": "Нью-Йорк", "en": "New York", "he": "ניו יורק"},
 }
 TEXTS = {
+    "google_source_button": {"ru": "Google Maps", "en": "Google Maps", "he": "Google Maps"},
+    "chabad_source_button": {"ru": "Chabad.org", "en": "Chabad.org", "he": "Chabad.org"},
     "restart_button": {"ru": "Начать сначала", "en": "Start over", "he": "להתחיל מחדש"},
     "help_button": {"ru": "Помощь", "en": "Help", "he": "עזרה"},
-    "tzedaka_button": {"ru": "Цдака", "en": "Tzedakah", "he": "צדקה"},
+    "tzedaka_button": {"ru": "Поддержать создателя", "en": "Support creator", "he": "לתמוך ביוצר"},
     "share_location_button": {"ru": "Отправить геопозицию", "en": "Share location", "he": "לשתף מיקום"},
     "manual_city_button": {"ru": "Ввести город самостоятельно", "en": "Enter another city", "he": "להזין עיר ידנית"},
     "choose_other_city_button": {"ru": "Выбрать другой город", "en": "Choose another city", "he": "לבחור עיר אחרת"},
@@ -111,6 +126,11 @@ TEXTS = {
         "ru": "🌐 Выберите язык / Choose language / בחר שפה",
         "en": "🌐 Choose language / Выберите язык / בחר שפה",
         "he": "🌐 בחר שפה / Choose language / Выберите язык",
+    },
+    "choose_source": {
+        "ru": "🧭 Выберите источник для поиска синагог:",
+        "en": "🧭 Choose a source for synagogue search:",
+        "he": "🧭 בחר מקור לחיפוש בתי כנסת:",
     },
     "welcome_city": {
         "ru": "🕍 Шалом! Я помогу найти синагогу в нужном городе.\n🌍 Выберите город из списка или введите его вручную.",
@@ -128,9 +148,69 @@ TEXTS = {
         "he": "ℹ️ לכל שאלה ניתן לפנות אל: {contact}",
     },
     "tzedaka_message": {
-        "ru": "🤍 Если хотите поддержать создателя бота, можно перевести цдаку на карту.\n\n💳 Номер карты: {card_number}",
-        "en": "🤍 If you want to support the bot creator, you can send tzedakah to this card.\n\n💳 Card number: {card_number}",
-        "he": "🤍 אם תרצו לתמוך ביוצר הבוט, אפשר לשלוח צדקה לכרטיס הזה.\n\n💳 מספר כרטיס: {card_number}",
+        "ru": "🤍 Вы можете поддержать создателя переводом на карту.\n\n💳 Номер карты: {card_number}",
+        "en": "🤍 You can support the creator with a card transfer.\n\n💳 Card number: {card_number}",
+        "he": "🤍 אפשר לתמוך ביוצר באמצעות העברה לכרטיס.\n\n💳 מספר כרטיס: {card_number}",
+    },
+    "support_menu": {
+        "ru": "🤍 Выберите способ поддержки:",
+        "en": "🤍 Choose a support method:",
+        "he": "🤍 בחר אופן תמיכה:",
+    },
+    "support_telegram_button": {
+        "ru": "⭐ Оплатить при помощи Telegram Stars",
+        "en": "⭐ Pay with Telegram Stars",
+        "he": "⭐ לשלם באמצעות Telegram Stars",
+    },
+    "support_requisites_button": {
+        "ru": "💳 Перевести по реквизитам",
+        "en": "💳 Transfer by card details",
+        "he": "💳 להעביר לפי פרטי כרטיס",
+    },
+    "stars_amount_prompt": {
+        "ru": "⭐ Выберите сумму поддержки в Telegram Stars:",
+        "en": "⭐ Choose a support amount in Telegram Stars:",
+        "he": "⭐ בחר סכום תמיכה ב-Telegram Stars:",
+    },
+    "stars_custom_amount_button": {
+        "ru": "✨ Свое количество звезд",
+        "en": "✨ Custom number of Stars",
+        "he": "✨ מספר מותאם של Stars",
+    },
+    "stars_custom_amount_prompt": {
+        "ru": "⭐ Введите количество Stars целым числом, например: 75",
+        "en": "⭐ Enter the number of Stars as a whole number, for example: 75",
+        "he": "⭐ הזן את מספר ה-Stars כמספר שלם, למשל: 75",
+    },
+    "stars_custom_amount_invalid": {
+        "ru": "Введите корректное количество Stars: целое число больше 0.",
+        "en": "Enter a valid number of Stars: a whole number greater than 0.",
+        "he": "הזן מספר תקין של Stars: מספר שלם גדול מ-0.",
+    },
+    "stars_invoice_title": {
+        "ru": "Поддержка создателя",
+        "en": "Support creator",
+        "he": "תמיכה ביוצר",
+    },
+    "stars_invoice_description": {
+        "ru": "Поддержка работы и развития бота",
+        "en": "Support the bot and its development",
+        "he": "תמיכה בעבודה ובפיתוח של הבוט",
+    },
+    "stars_invoice_label": {
+        "ru": "Поддержка",
+        "en": "Support",
+        "he": "תמיכה",
+    },
+    "stars_payment_success": {
+        "ru": "✅ Спасибо за поддержку! Платеж в Telegram Stars получен.",
+        "en": "✅ Thank you for your support! Your Telegram Stars payment has been received.",
+        "he": "✅ תודה על התמיכה! תשלום ה-Telegram Stars התקבל.",
+    },
+    "stars_payment_error": {
+        "ru": "Не удалось создать счет в Telegram Stars. Попробуйте еще раз позже.",
+        "en": "Could not create the Telegram Stars invoice. Please try again later.",
+        "he": "לא ניתן היה ליצור חשבון לתשלום ב-Telegram Stars. נסה שוב מאוחר יותר.",
     },
     "searching": {
         "ru": "🔎 Ищу актуальные синагоги. Это может занять несколько секунд.",
@@ -148,8 +228,8 @@ TEXTS = {
         "he": "📲 שלח את המיקום שלך באמצעות הכפתור למטה.",
     },
     "manual_city_prompt": {
-        "ru": '✍️ Введите город вручную в формате "Tel Aviv".',
-        "en": '✍️ Enter a city manually in the format "Tel Aviv".',
+        "ru": '✍️ Пожалуйста, ведите город вручную.',
+        "en": '✍️ Please, enter a city manually.',
         "he": '✍️ הזן עיר ידנית בפורמט "Tel Aviv".',
     },
     "general_list_header": {
@@ -206,23 +286,29 @@ TEXTS = {
     "waze": {"ru": "Waze", "en": "Waze", "he": "Waze"},
 }
 USER_LANGUAGES: dict[int, str] = {}
+USER_SOURCES: dict[int, str] = {}
 USER_LOCATION_CACHE: dict[int, dict[str, float]] = {}
 
 
 class SynagogueFinderStates(StatesGroup):
     choosing_language = State()
+    choosing_source = State()
     choosing_city = State()
     entering_city_manually = State()
     deciding_location = State()
+    entering_stars_amount = State()
 
 
 @dataclass
 class SynagoguePlace:
+    source: str
     place_id: str
     name: str
     lat: float
     lon: float
     google_maps_url: str
+    phone: str = ""
+    source_url: str = ""
 
     @property
     def waze_url(self) -> str:
@@ -240,6 +326,10 @@ def get_user_language(user_id: int) -> str:
     return USER_LANGUAGES.get(user_id, "ru")
 
 
+def get_user_source(user_id: int) -> str:
+    return USER_SOURCES.get(user_id, "google")
+
+
 def get_all_button_texts(key: str) -> tuple[str, ...]:
     return tuple(TEXTS[key].values())
 
@@ -250,6 +340,15 @@ def get_language_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=LANGUAGE_LABELS["ru"], callback_data="lang:ru")],
             [InlineKeyboardButton(text=LANGUAGE_LABELS["en"], callback_data="lang:en")],
             [InlineKeyboardButton(text=LANGUAGE_LABELS["he"], callback_data="lang:he")],
+        ]
+    )
+
+
+def get_source_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=tr(lang, "google_source_button"), callback_data="source:google")],
+            [InlineKeyboardButton(text=tr(lang, "chabad_source_button"), callback_data="source:chabad")],
         ]
     )
 
@@ -294,6 +393,7 @@ def get_city_inline_keyboard(lang: str) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text=CITY_LABELS["city:moscow"][lang], callback_data="city:moscow")],
             [InlineKeyboardButton(text=CITY_LABELS["city:tel_aviv"][lang], callback_data="city:tel_aviv")],
+            [InlineKeyboardButton(text=CITY_LABELS["city:new_york"][lang], callback_data="city:new_york")],
             [InlineKeyboardButton(text=tr(lang, "manual_city_button"), callback_data="city:manual")],
         ]
     )
@@ -305,6 +405,26 @@ def get_synagogue_links_keyboard(synagogue: SynagoguePlace, lang: str) -> Inline
             [InlineKeyboardButton(text=tr(lang, "google_maps"), url=synagogue.google_maps_url)],
             [InlineKeyboardButton(text=tr(lang, "waze"), url=synagogue.waze_url)],
         ]
+    )
+
+
+def get_support_options_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=tr(lang, "support_telegram_button"), callback_data="support:telegram")],
+            [InlineKeyboardButton(text=tr(lang, "support_requisites_button"), callback_data="support:requisites")],
+        ]
+    )
+
+
+def get_stars_amounts_keyboard(lang: str) -> InlineKeyboardMarkup:
+    amounts = (50, 100, 250, 500)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"{amount} ⭐", callback_data=f"stars:{amount}")]
+            for amount in amounts
+        ]
+        + [[InlineKeyboardButton(text=tr(lang, "stars_custom_amount_button"), callback_data="stars:custom")]]
     )
 
 
@@ -350,7 +470,25 @@ def fetch_json(
         return json.loads(response.read().decode("utf-8"))
 
 
-def fetch_synagogues_for_city(city_name: str) -> list[SynagoguePlace]:
+def fetch_text(url: str) -> str:
+    request = Request(
+        url,
+        headers={
+            "User-Agent": HTTP_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml",
+        },
+    )
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    with urlopen(request, timeout=30, context=ssl_context) as response:
+        html_text = response.read().decode("utf-8", errors="replace")
+
+    if "Just a moment..." in html_text and "challenges.cloudflare.com" in html_text:
+        raise RuntimeError("CHABAD_CLOUDFLARE_BLOCK")
+
+    return html_text
+
+
+def fetch_google_synagogues_for_city(city_name: str) -> list[SynagoguePlace]:
     if not GOOGLE_PLACES_API_KEY:
         raise RuntimeError("GOOGLE_PLACES_API_KEY_MISSING")
 
@@ -394,6 +532,7 @@ def fetch_synagogues_for_city(city_name: str) -> list[SynagoguePlace]:
             google_maps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
 
         unique_places[name.casefold()] = SynagoguePlace(
+            source="google",
             place_id=place_id,
             name=name,
             lat=float(lat),
@@ -402,6 +541,127 @@ def fetch_synagogues_for_city(city_name: str) -> list[SynagoguePlace]:
         )
 
     return sorted(unique_places.values(), key=lambda place: place.name.lower())
+
+
+def geocode_chabad_center(name: str, city_name: str) -> SynagoguePlace | None:
+    if not GOOGLE_PLACES_API_KEY:
+        raise RuntimeError("GOOGLE_PLACES_API_KEY_MISSING")
+
+    normalized_city = normalize_city_name(city_name)
+    search_city = CITY_SEARCH_QUERIES.get(normalized_city, normalized_city)
+    payload = {
+        "textQuery": f"{name}, {search_city}",
+        "languageCode": "en",
+        "maxResultCount": 1,
+    }
+    response = fetch_json(
+        GOOGLE_PLACES_TEXT_SEARCH_URL,
+        method="POST",
+        body=json.dumps(payload).encode("utf-8"),
+        extra_headers={
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
+            "X-Goog-FieldMask": GOOGLE_PLACES_FIELD_MASK,
+        },
+    )
+    places = response.get("places", [])
+    if not places:
+        return None
+
+    place = places[0]
+    place_id = place.get("id")
+    location = place.get("location", {})
+    lat = location.get("latitude")
+    lon = location.get("longitude")
+    google_maps_url = place.get("googleMapsUri")
+    if not place_id or lat is None or lon is None:
+        return None
+    if not google_maps_url:
+        google_maps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+
+    return SynagoguePlace(
+        source="chabad",
+        place_id=place_id,
+        name=name,
+        lat=float(lat),
+        lon=float(lon),
+        google_maps_url=google_maps_url,
+    )
+
+
+def parse_chabad_center_urls(html_text: str) -> list[str]:
+    matches = re.findall(
+        r'href="(?P<href>(?:https://www\.chabad\.org)?/jewish-centers/\d+/[^"]+/Synagogue/[^"]+)"',
+        html_text,
+        flags=re.IGNORECASE,
+    )
+    seen: set[str] = set()
+    urls: list[str] = []
+    for href in matches:
+        absolute_url = urljoin(CHABAD_BASE_URL, html.unescape(href))
+        if absolute_url in seen:
+            continue
+        seen.add(absolute_url)
+        urls.append(absolute_url)
+    return urls[:MAX_CHABAD_RESULTS]
+
+
+def parse_chabad_center_name(html_text: str, fallback_url: str) -> str:
+    patterns = [
+        r'<meta\s+property="og:title"\s+content="([^"]+)"',
+        r"<title>\s*([^<]+?)\s*-\s*(?:Chabad House|Synagogue|Campus Chabad House|Hospitality Center)[^<]*</title>",
+        r"<h1[^>]*>\s*([^<]+?)\s*</h1>",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html_text, flags=re.IGNORECASE)
+        if match:
+            return html.unescape(match.group(1)).strip()
+
+    slug = fallback_url.rstrip("/").split("/")[-1]
+    return slug.replace("-", " ").strip() or "Chabad Synagogue"
+
+
+def parse_chabad_phone(html_text: str) -> str:
+    phone_patterns = [
+        r'href="tel:([^"]+)"',
+        r"Phone:\s*</[^>]+>\s*([^<]+)",
+    ]
+    for pattern in phone_patterns:
+        match = re.search(pattern, html_text, flags=re.IGNORECASE)
+        if match:
+            return html.unescape(match.group(1)).strip()
+    return ""
+
+
+def fetch_chabad_synagogues_for_city(city_name: str) -> list[SynagoguePlace]:
+    normalized_city = normalize_city_name(city_name)
+    search_city = CITY_SEARCH_QUERIES.get(normalized_city, normalized_city)
+    search_url = f"{CHABAD_SEARCH_URL}?{urlencode({'query': search_city})}"
+    search_html = fetch_text(search_url)
+    center_urls = parse_chabad_center_urls(search_html)
+
+    unique_places: dict[str, SynagoguePlace] = {}
+    for center_url in center_urls:
+        try:
+            center_html = fetch_text(center_url)
+            center_name = parse_chabad_center_name(center_html, center_url)
+            phone = parse_chabad_phone(center_html)
+            geocoded = geocode_chabad_center(center_name, city_name)
+            if not geocoded:
+                continue
+            geocoded.phone = phone
+            geocoded.source_url = center_url
+            unique_places[geocoded.name.casefold()] = geocoded
+        except Exception:
+            logging.exception("Failed to parse Chabad center: %s", center_url)
+
+    return sorted(unique_places.values(), key=lambda place: place.name.lower())
+
+
+def fetch_synagogues_for_city(city_name: str, source: str) -> list[SynagoguePlace]:
+    if source == "chabad":
+        return fetch_chabad_synagogues_for_city(city_name)
+    return fetch_google_synagogues_for_city(city_name)
 
 
 def fetch_place_details(place_id: str) -> dict[str, Any]:
@@ -426,6 +686,13 @@ def build_fetch_error_message(error: Exception, lang: str) -> str:
             "he": "המשתנה GOOGLE_PLACES_API_KEY לא הוגדר. הוסף את מפתח Google Places API למשתני הסביבה.",
         }[lang]
 
+    if isinstance(error, RuntimeError) and str(error) == "CHABAD_CLOUDFLARE_BLOCK":
+        return {
+            "ru": "Chabad.org блокирует автоматические запросы через Cloudflare, поэтому сейчас получить данные из этого источника не удается.",
+            "en": "Chabad.org is blocking automated requests via Cloudflare, so the bot cannot currently fetch data from this source.",
+            "he": "Chabad.org חוסם בקשות אוטומטיות דרך Cloudflare, ולכן כרגע הבוט לא יכול לקבל נתונים מהמקור הזה.",
+        }[lang]
+
     if isinstance(error, HTTPError):
         try:
             error_body = error.read().decode("utf-8", errors="replace")
@@ -433,6 +700,12 @@ def build_fetch_error_message(error: Exception, lang: str) -> str:
             error_body = ""
 
         if error.code in (401, 403):
+            if error_body and "Just a moment..." in error_body and "challenges.cloudflare.com" in error_body:
+                return {
+                    "ru": "Chabad.org блокирует автоматические запросы через Cloudflare, поэтому сейчас получить данные из этого источника не удается.",
+                    "en": "Chabad.org is blocking automated requests via Cloudflare, so the bot cannot currently fetch data from this source.",
+                    "he": "Chabad.org חוסם בקשות אוטומטיות דרך Cloudflare, ולכן כרגע הבוט לא יכול לקבל נתונים מהמקור הזה.",
+                }[lang]
             base_message = (
                 {
                     "ru": "Google Places API отклонил запрос. Проверьте API key, включен ли Places API и подключен ли billing в Google Cloud.",
@@ -518,11 +791,14 @@ def calculate_distance_km(
 def serialize_synagogues(synagogues: list[SynagoguePlace]) -> list[dict[str, Any]]:
     return [
         {
+            "source": synagogue.source,
             "place_id": synagogue.place_id,
             "name": synagogue.name,
             "lat": synagogue.lat,
             "lon": synagogue.lon,
             "google_maps_url": synagogue.google_maps_url,
+            "phone": synagogue.phone,
+            "source_url": synagogue.source_url,
         }
         for synagogue in synagogues
     ]
@@ -531,11 +807,14 @@ def serialize_synagogues(synagogues: list[SynagoguePlace]) -> list[dict[str, Any
 def deserialize_synagogues(items: list[dict[str, Any]]) -> list[SynagoguePlace]:
     return [
         SynagoguePlace(
+            source=item["source"],
             place_id=item["place_id"],
             name=item["name"],
             lat=float(item["lat"]),
             lon=float(item["lon"]),
             google_maps_url=item["google_maps_url"],
+            phone=item.get("phone", ""),
+            source_url=item.get("source_url", ""),
         )
         for item in items
     ]
@@ -544,11 +823,14 @@ def deserialize_synagogues(items: list[dict[str, Any]]) -> list[SynagoguePlace]:
 def serialize_nearest_synagogues(items: list[tuple[SynagoguePlace, float]]) -> list[dict[str, Any]]:
     return [
         {
+            "source": synagogue.source,
             "place_id": synagogue.place_id,
             "name": synagogue.name,
             "lat": synagogue.lat,
             "lon": synagogue.lon,
             "google_maps_url": synagogue.google_maps_url,
+            "phone": synagogue.phone,
+            "source_url": synagogue.source_url,
             "distance_km": distance_km,
         }
         for synagogue, distance_km in items
@@ -559,11 +841,14 @@ def deserialize_nearest_synagogues(items: list[dict[str, Any]]) -> list[tuple[Sy
     return [
         (
             SynagoguePlace(
+                source=item["source"],
                 place_id=item["place_id"],
                 name=item["name"],
                 lat=float(item["lat"]),
                 lon=float(item["lon"]),
                 google_maps_url=item["google_maps_url"],
+                phone=item.get("phone", ""),
+                source_url=item.get("source_url", ""),
             ),
             float(item["distance_km"]),
         )
@@ -643,11 +928,16 @@ def build_synagogue_details_message(
     distance_km: float | None,
     lang: str,
 ) -> str:
-    phone = ""
+    phone = synagogue.phone
     rating_text = ""
     try:
         place_details = fetch_place_details(synagogue.place_id)
-        phone = place_details.get("internationalPhoneNumber") or place_details.get("nationalPhoneNumber") or ""
+        phone = (
+            phone
+            or place_details.get("internationalPhoneNumber")
+            or place_details.get("nationalPhoneNumber")
+            or ""
+        )
         rating = place_details.get("rating")
         user_rating_count = place_details.get("userRatingCount")
         if rating is not None and user_rating_count is not None:
@@ -726,6 +1016,11 @@ async def show_city_selection(message: Message, state: FSMContext, lang: str) ->
     await message.answer(tr(lang, "welcome_city"), reply_markup=get_city_inline_keyboard(lang))
 
 
+async def show_source_selection(message: Message, state: FSMContext, lang: str) -> None:
+    await state.set_state(SynagogueFinderStates.choosing_source)
+    await message.answer(tr(lang, "choose_source"), reply_markup=get_source_keyboard(lang))
+
+
 async def show_city_reselection(message: Message, state: FSMContext, lang: str) -> None:
     await state.set_state(SynagogueFinderStates.choosing_city)
     await message.answer(tr(lang, "reselect_city"), reply_markup=get_city_inline_keyboard(lang))
@@ -735,6 +1030,16 @@ async def send_help_message(message: Message, lang: str) -> None:
     await message.answer(tr(lang, "help_message", contact=HELP_CONTACT), reply_markup=get_bottom_menu_keyboard(lang))
 
 
+async def send_stars_invoice(message: Message, lang: str, amount: int) -> None:
+    await message.answer_invoice(
+        title=tr(lang, "stars_invoice_title"),
+        description=tr(lang, "stars_invoice_description"),
+        payload=f"support_stars_{amount}",
+        currency="XTR",
+        prices=[LabeledPrice(label=tr(lang, "stars_invoice_label"), amount=amount)],
+    )
+
+
 async def fetch_city_synagogues(
     message: Message,
     state: FSMContext,
@@ -742,10 +1047,11 @@ async def fetch_city_synagogues(
     lang: str,
     user_id: int,
 ) -> None:
+    source = get_user_source(user_id)
     waiting_message = await message.answer(tr(lang, "searching"), reply_markup=get_bottom_menu_keyboard(lang))
 
     try:
-        synagogues = await asyncio.to_thread(fetch_synagogues_for_city, city_name)
+        synagogues = await asyncio.to_thread(fetch_synagogues_for_city, city_name, source)
     except Exception as error:
         logging.exception("Failed to fetch synagogues")
         await waiting_message.answer(
@@ -784,12 +1090,22 @@ async def handle_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(SynagogueFinderStates.choosing_language)
     await message.answer(tr("ru", "choose_language"), reply_markup=get_language_keyboard())
+    await message.answer(" ", reply_markup=get_bottom_menu_keyboard("ru"))
 
 
 @dp.callback_query(F.data.startswith("lang:"))
 async def handle_language_choice(callback: CallbackQuery, state: FSMContext) -> None:
     lang = callback.data.split(":", 1)[1]
     USER_LANGUAGES[callback.from_user.id] = lang
+    await callback.answer()
+    await show_source_selection(callback.message, state, lang)
+
+
+@dp.callback_query(F.data.startswith("source:"))
+async def handle_source_choice(callback: CallbackQuery, state: FSMContext) -> None:
+    source = callback.data.split(":", 1)[1]
+    USER_SOURCES[callback.from_user.id] = source
+    lang = get_user_language(callback.from_user.id)
     await callback.answer()
     await state.clear()
     await show_city_selection(callback.message, state, lang)
@@ -800,7 +1116,7 @@ async def handle_restart(message: Message, state: FSMContext) -> None:
     lang = get_user_language(message.from_user.id)
     await state.clear()
     await message.answer(tr(lang, "restart_message"))
-    await show_city_selection(message, state, lang)
+    await show_source_selection(message, state, lang)
 
 
 @dp.message(F.text.in_(get_all_button_texts("help_button")))
@@ -812,7 +1128,100 @@ async def handle_help(message: Message) -> None:
 async def handle_tzedaka(message: Message) -> None:
     lang = get_user_language(message.from_user.id)
     await message.answer(
+        tr(lang, "support_menu"),
+        reply_markup=get_support_options_keyboard(lang),
+    )
+
+
+@dp.callback_query(F.data == "support:requisites")
+async def handle_support_requisites(callback: CallbackQuery) -> None:
+    lang = get_user_language(callback.from_user.id)
+    await callback.answer()
+    await callback.message.answer(
         tr(lang, "tzedaka_message", card_number=TZDAKA_CARD_NUMBER),
+        reply_markup=get_bottom_menu_keyboard(lang),
+    )
+
+
+@dp.callback_query(F.data == "support:telegram")
+async def handle_support_telegram(callback: CallbackQuery) -> None:
+    lang = get_user_language(callback.from_user.id)
+    await callback.answer()
+    await callback.message.answer(
+        tr(lang, "stars_amount_prompt"),
+        reply_markup=get_stars_amounts_keyboard(lang),
+    )
+
+
+@dp.callback_query(F.data.startswith("stars:"))
+async def handle_stars_invoice(callback: CallbackQuery, state: FSMContext) -> None:
+    lang = get_user_language(callback.from_user.id)
+    if callback.data == "stars:custom":
+        await callback.answer()
+        await state.set_state(SynagogueFinderStates.entering_stars_amount)
+        await callback.message.answer(
+            tr(lang, "stars_custom_amount_prompt"),
+            reply_markup=get_bottom_menu_keyboard(lang),
+        )
+        return
+
+    try:
+        amount = int(callback.data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        await callback.answer(tr(lang, "stars_payment_error"), show_alert=True)
+        return
+
+    await callback.answer()
+    try:
+        await send_stars_invoice(callback.message, lang, amount)
+    except Exception:
+        logging.exception("Failed to create Telegram Stars invoice")
+        await callback.message.answer(
+            tr(lang, "stars_payment_error"),
+            reply_markup=get_bottom_menu_keyboard(lang),
+        )
+
+
+@dp.message(SynagogueFinderStates.entering_stars_amount, F.text)
+async def handle_custom_stars_amount(message: Message, state: FSMContext) -> None:
+    lang = get_user_language(message.from_user.id)
+    try:
+        amount = int(message.text.strip())
+    except (TypeError, ValueError):
+        await message.answer(
+            tr(lang, "stars_custom_amount_invalid"),
+            reply_markup=get_bottom_menu_keyboard(lang),
+        )
+        return
+
+    if amount <= 0:
+        await message.answer(
+            tr(lang, "stars_custom_amount_invalid"),
+            reply_markup=get_bottom_menu_keyboard(lang),
+        )
+        return
+
+    await state.clear()
+    try:
+        await send_stars_invoice(message, lang, amount)
+    except Exception:
+        logging.exception("Failed to create Telegram Stars invoice")
+        await message.answer(
+            tr(lang, "stars_payment_error"),
+            reply_markup=get_bottom_menu_keyboard(lang),
+        )
+
+
+@dp.pre_checkout_query()
+async def handle_pre_checkout_query(pre_checkout_query: PreCheckoutQuery) -> None:
+    await pre_checkout_query.answer(ok=True)
+
+
+@dp.message(F.successful_payment)
+async def handle_successful_payment(message: Message) -> None:
+    lang = get_user_language(message.from_user.id)
+    await message.answer(
+        tr(lang, "stars_payment_success"),
         reply_markup=get_bottom_menu_keyboard(lang),
     )
 
@@ -931,6 +1340,9 @@ async def handle_choose_other_city(callback: CallbackQuery, state: FSMContext) -
     lang = get_user_language(callback.from_user.id)
     await callback.answer()
     await state.clear()
+    if callback.from_user.id not in USER_SOURCES:
+        await show_source_selection(callback.message, state, lang)
+        return
     await show_city_reselection(callback.message, state, lang)
 
 
@@ -965,6 +1377,10 @@ async def handle_fallback(message: Message, state: FSMContext) -> None:
     if message.from_user.id not in USER_LANGUAGES:
         await state.set_state(SynagogueFinderStates.choosing_language)
         await message.answer(tr("ru", "choose_language"), reply_markup=get_language_keyboard())
+        return
+
+    if message.from_user.id not in USER_SOURCES:
+        await show_source_selection(message, state, lang)
         return
 
     await show_city_selection(message, state, lang)
