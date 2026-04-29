@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, urljoin
+from urllib.parse import quote_plus, urlencode, urljoin
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -60,7 +60,6 @@ if not BOT_TOKEN and BOT_TOKEN_FALLBACK:
     BOT_TOKEN = BOT_TOKEN_FALLBACK
 
 HELP_CONTACT = "@architector_isr"
-TZDAKA_CARD_NUMBER = "0000 0000 0000 0000"
 HTTP_USER_AGENT = "SynagogueFinderBot/1.0 (contact: @your_support_contact)"
 GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY")
 GOOGLE_PLACES_TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
@@ -71,6 +70,7 @@ GOOGLE_PLACES_FIELD_MASK = ",".join(
     [
         "places.id",
         "places.displayName",
+        "places.formattedAddress",
         "places.location",
         "places.googleMapsUri",
     ]
@@ -133,9 +133,9 @@ TEXTS = {
         "he": "🧭 בחר מקור לחיפוש בתי כנסת:",
     },
     "welcome_city": {
-        "ru": "🕍 Шалом! Я помогу найти синагогу в нужном городе.\n🌍 Выберите город из списка или введите его вручную.",
-        "en": "🕍 Shalom! I will help you find a synagogue in the city you need.\n🌍 Choose a city from the list or enter it manually.",
-        "he": "🕍 שלום! אני אעזור לך למצוא בית כנסת בעיר הרצויה.\n🌍 בחר עיר מהרשימה או הזן אותה ידנית.",
+        "ru": "🕍 Шалом! Я помогу найти синагогу в вашем городе.\n🌍 Выберите город из списка или введите его вручную.",
+        "en": "🕍 Shalom! I will help you find a synagogue in your city.\n🌍 Choose a city from the list or enter it manually.",
+        "he": "🕍 שלום! אני אעזור לך למצוא בית כנסת בעיר שלך.\n🌍 בחר עיר מהרשימה או הזן אותה ידנית.",
     },
     "reselect_city": {
         "ru": "🌍 Выберите город из списка или введите его вручную.",
@@ -147,25 +147,15 @@ TEXTS = {
         "en": "ℹ️ For any questions, contact: {contact}",
         "he": "ℹ️ לכל שאלה ניתן לפנות אל: {contact}",
     },
-    "tzedaka_message": {
-        "ru": "🤍 Вы можете поддержать создателя переводом на карту.\n\n💳 Номер карты: {card_number}",
-        "en": "🤍 You can support the creator with a card transfer.\n\n💳 Card number: {card_number}",
-        "he": "🤍 אפשר לתמוך ביוצר באמצעות העברה לכרטיס.\n\n💳 מספר כרטיס: {card_number}",
-    },
     "support_menu": {
-        "ru": "🤍 Выберите способ поддержки:",
-        "en": "🤍 Choose a support method:",
-        "he": "🤍 בחר אופן תמיכה:",
+        "ru": "🤍 Выберите способ поддержки:\n\n1. При помощи Telegram звезд\n2. Если у вас русская карта, вы можете связаться с @architector_isr для получения реквизитов!\n\nСпасибо вам!",
+        "en": "🤍 Choose a support method:\n\n1. Using Telegram Stars\n2. If you have a Russian bank card, you can contact @architector_isr to receive the payment details!\n\nThank you!",
+        "he": "🤍 בחר אופן תמיכה:\n\n1. באמצעות Telegram Stars\n2. אם יש לך כרטיס בנק רוסי, אפשר ליצור קשר עם @architector_isr כדי לקבל את פרטי התשלום!\n\nתודה רבה!",
     },
     "support_telegram_button": {
         "ru": "⭐ Оплатить при помощи Telegram Stars",
         "en": "⭐ Pay with Telegram Stars",
         "he": "⭐ לשלם באמצעות Telegram Stars",
-    },
-    "support_requisites_button": {
-        "ru": "💳 Перевести по реквизитам",
-        "en": "💳 Transfer by card details",
-        "he": "💳 להעביר לפי פרטי כרטיס",
     },
     "stars_amount_prompt": {
         "ru": "⭐ Выберите сумму поддержки в Telegram Stars:",
@@ -283,6 +273,7 @@ TEXTS = {
         "he": "הרשימה כבר לא עדכנית. בחר את העיר מחדש.",
     },
     "google_maps": {"ru": "Google Maps", "en": "Google Maps", "he": "Google Maps"},
+    "yandex_maps": {"ru": "Яндекс Карты", "en": "Yandex Maps", "he": "Yandex Maps"},
     "waze": {"ru": "Waze", "en": "Waze", "he": "Waze"},
 }
 USER_LANGUAGES: dict[int, str] = {}
@@ -307,12 +298,30 @@ class SynagoguePlace:
     lat: float
     lon: float
     google_maps_url: str
+    formatted_address: str = ""
     phone: str = ""
     source_url: str = ""
 
     @property
     def waze_url(self) -> str:
         return f"https://www.waze.com/ul?ll={self.lat},{self.lon}&navigate=yes"
+
+    @property
+    def yandex_maps_url(self) -> str:
+        query_parts = [self.name]
+        if self.formatted_address:
+            query_parts.append(self.formatted_address)
+        query = ", ".join(query_parts)
+        return f"https://yandex.ru/maps/?text={quote_plus(query)}"
+
+    @property
+    def is_in_russia(self) -> bool:
+        address = self.formatted_address.casefold()
+        return (
+            "russia" in address
+            or "russian federation" in address
+            or "россия" in address
+        )
 
 
 dp = Dispatcher()
@@ -400,19 +409,23 @@ def get_city_inline_keyboard(lang: str) -> InlineKeyboardMarkup:
 
 
 def get_synagogue_links_keyboard(synagogue: SynagoguePlace, lang: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=tr(lang, "google_maps"), url=synagogue.google_maps_url)],
-            [InlineKeyboardButton(text=tr(lang, "waze"), url=synagogue.waze_url)],
-        ]
+    inline_keyboard = [
+        [InlineKeyboardButton(text=tr(lang, "google_maps"), url=synagogue.google_maps_url)],
+    ]
+    if synagogue.is_in_russia:
+        inline_keyboard.append(
+            [InlineKeyboardButton(text=tr(lang, "yandex_maps"), url=synagogue.yandex_maps_url)]
+        )
+    inline_keyboard.append(
+        [InlineKeyboardButton(text=tr(lang, "waze"), url=synagogue.waze_url)]
     )
+    return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
 
 
 def get_support_options_keyboard(lang: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=tr(lang, "support_telegram_button"), callback_data="support:telegram")],
-            [InlineKeyboardButton(text=tr(lang, "support_requisites_button"), callback_data="support:requisites")],
         ]
     )
 
@@ -519,6 +532,7 @@ def fetch_google_synagogues_for_city(city_name: str) -> list[SynagoguePlace]:
     for place in places:
         place_id = place.get("id")
         display_name = place.get("displayName", {})
+        formatted_address = place.get("formattedAddress", "")
         location = place.get("location", {})
         name = display_name.get("text")
         lat = location.get("latitude")
@@ -538,6 +552,7 @@ def fetch_google_synagogues_for_city(city_name: str) -> list[SynagoguePlace]:
             lat=float(lat),
             lon=float(lon),
             google_maps_url=google_maps_url,
+            formatted_address=formatted_address,
         )
 
     return sorted(unique_places.values(), key=lambda place: place.name.lower())
@@ -570,6 +585,7 @@ def geocode_chabad_center(name: str, city_name: str) -> SynagoguePlace | None:
 
     place = places[0]
     place_id = place.get("id")
+    formatted_address = place.get("formattedAddress", "")
     location = place.get("location", {})
     lat = location.get("latitude")
     lon = location.get("longitude")
@@ -586,6 +602,7 @@ def geocode_chabad_center(name: str, city_name: str) -> SynagoguePlace | None:
         lat=float(lat),
         lon=float(lon),
         google_maps_url=google_maps_url,
+        formatted_address=formatted_address,
     )
 
 
@@ -797,6 +814,7 @@ def serialize_synagogues(synagogues: list[SynagoguePlace]) -> list[dict[str, Any
             "lat": synagogue.lat,
             "lon": synagogue.lon,
             "google_maps_url": synagogue.google_maps_url,
+            "formatted_address": synagogue.formatted_address,
             "phone": synagogue.phone,
             "source_url": synagogue.source_url,
         }
@@ -813,6 +831,7 @@ def deserialize_synagogues(items: list[dict[str, Any]]) -> list[SynagoguePlace]:
             lat=float(item["lat"]),
             lon=float(item["lon"]),
             google_maps_url=item["google_maps_url"],
+            formatted_address=item.get("formatted_address", ""),
             phone=item.get("phone", ""),
             source_url=item.get("source_url", ""),
         )
@@ -829,6 +848,7 @@ def serialize_nearest_synagogues(items: list[tuple[SynagoguePlace, float]]) -> l
             "lat": synagogue.lat,
             "lon": synagogue.lon,
             "google_maps_url": synagogue.google_maps_url,
+            "formatted_address": synagogue.formatted_address,
             "phone": synagogue.phone,
             "source_url": synagogue.source_url,
             "distance_km": distance_km,
@@ -847,6 +867,7 @@ def deserialize_nearest_synagogues(items: list[dict[str, Any]]) -> list[tuple[Sy
                 lat=float(item["lat"]),
                 lon=float(item["lon"]),
                 google_maps_url=item["google_maps_url"],
+                formatted_address=item.get("formatted_address", ""),
                 phone=item.get("phone", ""),
                 source_url=item.get("source_url", ""),
             ),
@@ -1130,16 +1151,6 @@ async def handle_tzedaka(message: Message) -> None:
     await message.answer(
         tr(lang, "support_menu"),
         reply_markup=get_support_options_keyboard(lang),
-    )
-
-
-@dp.callback_query(F.data == "support:requisites")
-async def handle_support_requisites(callback: CallbackQuery) -> None:
-    lang = get_user_language(callback.from_user.id)
-    await callback.answer()
-    await callback.message.answer(
-        tr(lang, "tzedaka_message", card_number=TZDAKA_CARD_NUMBER),
-        reply_markup=get_bottom_menu_keyboard(lang),
     )
 
 
