@@ -35,20 +35,17 @@ This is a bot for converting files (first version converts docs -> pdf and back)
 
 -----------------------------------------------------------------------------------------------------
 # 3. Jew bot
-This is a bot for finding a Synagogue in every city
+This is a bot for Jews
 
-bot takes data from Google Maps but to make this type of connection you have to create an API KEY at Google Cloud.
-It also takes data from Chabad.org to find only CHABAD synagogues
-At the beginning it's free to use but in future i'll have to pay for API KEY usage.
+Features:
+- Finds nearest Synagogue
+- Tells about the time of the start of Shabbad
+- Shows today's Tehilim and allows to read any of chapters
+- Shows the text of Shema Prayer
 
-## Features
-- lets user choose the language
-- lets users choose the city
-- bot takes the data from the Source and shows the exact places where Synagogue is located with the link to Google Maps and Waze
-it also find synagogues near you by using your location if you like.
+Languages: Hebrew, Russian, English
 
-
-## Tech Stack
+Tech Stack: 
 - Python
 - aiogram
 
