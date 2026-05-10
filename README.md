@@ -34,7 +34,7 @@ This is a bot for converting files (first version converts docs -> pdf and back)
 - aiogram
 
 -----------------------------------------------------------------------------------------------------
-# 3. Find Synagogue bot (Temporary, upgrade soon)
+# 3. Jew bot
 This is a bot for finding a Synagogue in every city
 
 bot takes data from Google Maps but to make this type of connection you have to create an API KEY at Google Cloud.
